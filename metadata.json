@@ -1,0 +1,6 @@
+{
+  "name": "Math Mentor",
+  "description": "Your AI-powered personal math tutor. Practice problems, interactive explanations, and step-by-step guidance.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
