@@ -66,7 +66,17 @@ export default function App() {
   const [userName, setUserName] = useState('');
   const [nickname, setNickname] = useState('');
   const [userAge, setUserAge] = useState('');
-  const [hasOnboarded, setHasOnboarded] = useState(false);
+  const [onboardingStep, setOnboardingStep] = useState<'details' | 'assessment' | 'complete'>('details');
+  const [userLevel, setUserLevel] = useState<string>('Beginner');
+  const [assessedTopics, setAssessedTopics] = useState<{title: string, sub: string, color: string, topic: string}[]>([]);
+  const [assessmentChatHistory, setAssessmentChatHistory] = useState<Message[]>([]);
+  const [assessmentInput, setAssessmentInput] = useState('');
+  const [isAssessmentTyping, setIsAssessmentTyping] = useState(false);
+  const assessmentChatEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    assessmentChatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [assessmentChatHistory, isAssessmentTyping]);
 
   // Tutor State
   const [chatHistory, setChatHistory] = useState<Message[]>([]);
@@ -143,6 +153,113 @@ export default function App() {
     }
   };
 
+  const handleAssessmentSendMessage = async (initialMessage?: string) => {
+    const messageToSend = initialMessage || assessmentInput;
+    if (!messageToSend.trim() || isAssessmentTyping) return;
+
+    if (!initialMessage) {
+      const newMessage: Message = { role: 'user', parts: [{ text: messageToSend }] };
+      setAssessmentChatHistory(prev => [...prev, newMessage]);
+      setAssessmentInput('');
+    }
+    setIsAssessmentTyping(true);
+
+    try {
+      const response = await fetch('/api/assessment-chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          message: messageToSend, 
+          history: assessmentChatHistory,
+          name: userName || nickname,
+          age: userAge
+        }),
+      });
+
+      if (!response.ok) throw new Error('Failed to fetch');
+
+      const reader = response.body?.getReader();
+      if (!reader) return;
+
+      let modelResponse = '';
+      setAssessmentChatHistory(prev => [...prev, { role: 'model', parts: [{ text: '' }] }]);
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const chunk = new TextDecoder().decode(value);
+        const lines = chunk.split('\n');
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const data = line.slice(6);
+            if (data === '[DONE]') break;
+            try {
+              const { text } = JSON.parse(data);
+              modelResponse += text;
+              setAssessmentChatHistory(prev => {
+                const updated = [...prev];
+                updated[updated.length - 1].parts[0].text = modelResponse;
+                return updated;
+              });
+            } catch (e) {
+              // Ignore empty or malformed chunks
+            }
+          }
+        }
+      }
+
+      // Check if assessment is complete
+      const completionMatch = modelResponse.match(/ASSESSMENT_COMPLETE:\s*(Beginner|Intermediate|Advanced):\s*(.*)/i);
+      if (completionMatch) {
+        const level = completionMatch[1];
+        const topicsStr = completionMatch[2];
+        const topicsList = topicsStr.split(',').map(t => t.trim());
+        
+        const colors = [
+          "from-blue-600 to-indigo-700",
+          "from-purple-600 to-pink-700",
+          "from-emerald-600 to-teal-700"
+        ];
+        
+        const newTopics = topicsList.map((t, i) => ({
+          title: t,
+          sub: "Assessed Topic",
+          color: colors[i % colors.length],
+          topic: t
+        }));
+
+        setUserLevel(level);
+        setDifficulty(level);
+        setAssessedTopics(newTopics);
+        
+        // Remove the completion text from the final message
+        setAssessmentChatHistory(prev => {
+          const updated = [...prev];
+          updated[updated.length - 1].parts[0].text = modelResponse.replace(/ASSESSMENT_COMPLETE:.*/s, '').trim();
+          return updated;
+        });
+
+        setTimeout(() => setOnboardingStep('complete'), 3000);
+      }
+
+    } catch (error) {
+      console.error(error);
+      setAssessmentChatHistory(prev => [...prev, { role: 'model', parts: [{ text: 'Sorry, I encountered an error. Please try again.' }] }]);
+    } finally {
+      setIsAssessmentTyping(false);
+    }
+  };
+
+  const startAssessment = () => {
+    if (!userName.trim() || !nickname.trim() || !userAge) return;
+    setOnboardingStep('assessment');
+    setTimeout(() => {
+        handleAssessmentSendMessage("Hello! I'm ready for my assessment.");
+    }, 500);
+  };
+
   const generateProblems = async () => {
     setIsLoadingProblems(true);
     setProblems([]);
@@ -214,9 +331,9 @@ export default function App() {
     }
   };
 
-  const recommendations = getRecommendedTopics(userAge);
+  const recommendations = assessedTopics.length > 0 ? assessedTopics : getRecommendedTopics(userAge);
 
-  if (!hasOnboarded) {
+  if (onboardingStep === 'details') {
     return (
       <div className="h-screen bg-brand-black flex items-center justify-center p-6 selection:bg-brand-blue/30 overflow-hidden relative">
         <div className="absolute inset-0 bg-brand-blue/5 opacity-20 pointer-events-none" />
@@ -262,7 +379,7 @@ export default function App() {
                   type="number" 
                   value={userAge}
                   onChange={(e) => setUserAge(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && userName.trim() && nickname.trim() && userAge && setHasOnboarded(true)}
+                  onKeyDown={(e) => e.key === 'Enter' && userName.trim() && nickname.trim() && userAge && startAssessment()}
                   placeholder="Enter your age..."
                   className="w-full bg-brand-dark border-2 border-slate-800 text-white rounded-2xl px-6 py-4 text-base focus:outline-none focus:ring-4 focus:ring-brand-blue/10 focus:border-brand-blue transition-all placeholder:text-slate-700"
                 />
@@ -270,15 +387,94 @@ export default function App() {
             </div>
 
             <button 
-              onClick={() => userName.trim() && nickname.trim() && userAge && setHasOnboarded(true)}
+              onClick={startAssessment}
               disabled={!userName.trim() || !nickname.trim() || !userAge}
               className="w-full bg-brand-blue hover:bg-brand-blue/90 text-white py-5 rounded-2xl font-bold text-lg transition-all flex items-center justify-center gap-4 shadow-[0_0_30px_rgba(59,130,246,0.25)] disabled:opacity-20 group"
             >
-              Access Dashboard
+              Begin Assessment
               <ChevronRight size={20} className="group-hover:translate-x-1 transition-transform" />
             </button>
           </div>
         </motion.div>
+      </div>
+    );
+  }
+
+  if (onboardingStep === 'assessment') {
+    return (
+      <div className="h-screen bg-brand-black flex flex-col items-center justify-center p-6 selection:bg-brand-blue/30 relative">
+        <div className="absolute inset-0 bg-brand-blue/5 opacity-20 pointer-events-none" />
+        
+        <div className="w-full max-w-2xl h-[80vh] flex flex-col bg-brand-dark rounded-[2.5rem] border border-slate-800 shadow-2xl overflow-hidden z-10 relative">
+          <div className="p-6 border-b border-slate-800 bg-brand-dark/50 backdrop-blur-md flex items-center justify-between">
+            <div className="flex items-center gap-4">
+              <div className="w-12 h-12 bg-brand-blue/10 rounded-2xl flex items-center justify-center text-brand-blue border border-brand-blue/20">
+                <Sparkles size={24} />
+              </div>
+              <div>
+                <h3 className="font-bold text-white font-display text-lg tracking-tight">Initial Assessment</h3>
+                <p className="text-[10px] text-brand-blue font-bold uppercase tracking-widest">Evaluating Skill Level</p>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex-1 overflow-y-auto p-8 space-y-8 no-scrollbar">
+            {assessmentChatHistory.filter(msg => !msg.parts[0].text.includes("I'm ready for my assessment")).map((msg, i) => (
+              <div key={i} className={cn("flex", msg.role === 'user' ? "justify-end" : "justify-start")}>
+                <div className={cn(
+                  "max-w-[80%] px-6 py-5 rounded-3xl",
+                  msg.role === 'user' 
+                    ? "bg-brand-blue text-white rounded-tr-none shadow-lg shadow-brand-blue/10 border border-brand-blue/20" 
+                    : "bg-slate-800/40 text-slate-200 rounded-tl-none border border-slate-700/50 backdrop-blur-sm"
+                )}>
+                  <MathRenderer content={msg.parts[0].text} />
+                </div>
+              </div>
+            ))}
+            {isAssessmentTyping && (
+              <div className="flex justify-start">
+                <div className="bg-slate-800/40 px-6 py-5 rounded-3xl rounded-tl-none border border-slate-700/50 flex items-center gap-3">
+                  <div className="flex gap-1">
+                    <motion.div animate={{ scale: [1, 1.5, 1] }} transition={{ repeat: Infinity, duration: 1 }} className="w-1.5 h-1.5 rounded-full bg-brand-blue" />
+                    <motion.div animate={{ scale: [1, 1.5, 1] }} transition={{ repeat: Infinity, duration: 1, delay: 0.2 }} className="w-1.5 h-1.5 rounded-full bg-brand-blue" />
+                    <motion.div animate={{ scale: [1, 1.5, 1] }} transition={{ repeat: Infinity, duration: 1, delay: 0.4 }} className="w-1.5 h-1.5 rounded-full bg-brand-blue" />
+                  </div>
+                  <span className="text-xs font-bold text-slate-500 uppercase tracking-widest">Generating Question</span>
+                </div>
+              </div>
+            )}
+            <div ref={assessmentChatEndRef} />
+          </div>
+
+          <div className="p-6 bg-brand-black/40 backdrop-blur-xl border-t border-slate-800">
+            <div className="relative">
+              <textarea 
+                value={assessmentInput}
+                onChange={(e) => setAssessmentInput(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && (e.preventDefault(), handleAssessmentSendMessage())}
+                placeholder="Type your answer here..."
+                className="w-full bg-slate-900/50 border border-slate-700 hover:border-slate-500 rounded-2xl px-6 py-5 pr-16 text-sm focus:outline-none focus:ring-4 focus:ring-brand-blue/5 focus:border-brand-blue transition-all resize-none h-20 text-slate-100 placeholder:text-slate-600 shadow-inner no-scrollbar"
+                disabled={isAssessmentTyping || assessedTopics.length > 0}
+              />
+              <button 
+                onClick={() => handleAssessmentSendMessage()}
+                disabled={!assessmentInput.trim() || isAssessmentTyping || assessedTopics.length > 0}
+                className="absolute right-4 bottom-4 p-3.5 bg-brand-blue text-white rounded-xl hover:bg-brand-blue/90 disabled:opacity-30 disabled:grayscale transition-all shadow-[0_0_15px_rgba(59,130,246,0.3)]"
+              >
+                <Send size={20} />
+              </button>
+            </div>
+            {assessedTopics.length > 0 && (
+                <div className="mt-4 flex items-center justify-between bg-emerald-500/10 border border-emerald-500/20 p-4 rounded-xl">
+                  <div>
+                    <p className="text-emerald-400 font-bold text-sm">Assessment Complete!</p>
+                    <p className="text-slate-300 text-xs mt-1">Level: {userLevel}</p>
+                  </div>
+                  <Loader2 className="animate-spin text-emerald-400" />
+                </div>
+            )}
+          </div>
+        </div>
       </div>
     );
   }
